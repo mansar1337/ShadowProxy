@@ -1,0 +1,33 @@
+{
+  "luci-app-shadowproxy": {
+    "description": "Grant UCI and RPC access to LuCI app ShadowProxy",
+    "read": {
+      "file": {
+        "/etc/init.d/podkop": [
+          "exec"
+        ],
+        "/usr/bin/podkop": [
+          "exec"
+        ],
+        "/usr/bin/shadowproxy-subscription": [
+          "exec"
+        ]
+      },
+      "ubus": {
+        "service": [
+          "list"
+        ]
+      },
+      "uci": [
+        "podkop",
+        "shadowproxy"
+      ]
+    },
+    "write": {
+      "uci": [
+        "podkop",
+        "shadowproxy"
+      ]
+    }
+  }
+}

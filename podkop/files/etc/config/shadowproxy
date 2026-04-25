@@ -1,0 +1,4 @@
+config subscription 'subscription'
+        option url ''
+        option decode_base64 '0'
+        option custom_ua '0'
