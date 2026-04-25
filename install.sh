@@ -62,6 +62,20 @@ pkg_install() {
     fi
 }
 
+find_downloaded_pkg() {
+    local pattern="$1"
+    local f
+
+    for f in "$DOWNLOAD_DIR"/$pattern; do
+        if [ -f "$f" ]; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 update_config() {
     printf "\033[48;5;196m\033[1m╔══════════════════════════════════════════════════════════════════════╗\033[0m\n"
     printf "\033[48;5;196m\033[1m║ ! Обнаружена старая версия podkop.                                   ║\033[0m\n"
@@ -109,10 +123,10 @@ main() {
 
     pkg_list_update || { echo "Packages list update failed"; exit 1; }
 
-    if [ -f "/etc/init.d/podkop" ]; then
-        msg "Podkop is already installed. Upgrading..."
+    if [ -f "/etc/init.d/podkop" ] || [ -f "/etc/init.d/shadowproxy" ]; then
+        msg "ShadowProxy is already installed. Upgrading..."
     else
-        msg "Installing podkop..."
+        msg "Installing ShadowProxy..."
     fi
 
     if command -v curl >/dev/null 2>&1; then
@@ -160,20 +174,21 @@ main() {
         exit 1
     fi
 
-    for pkg in shadowproxy luci-app-shadowproxy; do
-        file=""
-        for f in "$DOWNLOAD_DIR"/"$pkg"*; do
-            if [ -f "$f" ]; then
-                file=$(basename "$f")
-                break
-            fi
-        done
-        if [ -n "$file" ]; then
-            msg "Installing $file..."
-            pkg_install "$DOWNLOAD_DIR/$file"
-            sleep 3
-        fi
-    done
+    shadowproxy_pkg="$(find_downloaded_pkg "shadowproxy*.ipk" || find_downloaded_pkg "shadowproxy*.apk" || true)"
+    luci_pkg="$(find_downloaded_pkg "luci-app-shadowproxy*.ipk" || find_downloaded_pkg "luci-app-shadowproxy*.apk" || true)"
+
+    if [ -z "$shadowproxy_pkg" ] || [ -z "$luci_pkg" ]; then
+        msg "Required packages were not downloaded (shadowproxy and/or luci-app-shadowproxy)"
+        exit 1
+    fi
+
+    msg "Installing $(basename "$shadowproxy_pkg")..."
+    pkg_install "$shadowproxy_pkg"
+    sleep 2
+
+    msg "Installing $(basename "$luci_pkg")..."
+    pkg_install "$luci_pkg"
+    sleep 2
 
     ru=""
     for f in "$DOWNLOAD_DIR"/luci-i18n-podkop-ru*; do
