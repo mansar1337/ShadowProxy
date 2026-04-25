@@ -1,7 +1,8 @@
 #!/bin/sh
 # shellcheck shell=dash
 
-REPO="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
+REPO="https://api.github.com/repos/mansar1337/ShadowProxy/releases/tags/release"
+REPO_HUMAN_URL="https://github.com/mansar1337/ShadowProxy/releases/tag/release"
 DOWNLOAD_DIR="/tmp/podkop"
 COUNT=3
 
@@ -115,7 +116,7 @@ main() {
     fi
 
     if command -v curl >/dev/null 2>&1; then
-        check_response=$(curl -s "https://api.github.com/repos/itdoginfo/podkop/releases/latest")
+        check_response=$(curl -s "$REPO")
 
         if echo "$check_response" | grep -q 'API rate limit '; then
             msg "You've reached the GitHub rate limit. Repeat in five minutes."
@@ -208,6 +209,14 @@ main() {
     fi
 
     find "$DOWNLOAD_DIR" -type f -name '*podkop*' -exec rm {} \;
+
+    msg "Installing OpenWRT sing-box extended..."
+    if ! wget -O - https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh | sh; then
+        msg "OpenWRT sing-box extended installation failed"
+        exit 1
+    fi
+
+    msg "Done. Release source: $REPO_HUMAN_URL"
 }
 
 check_system() {
