@@ -1,0 +1,13 @@
+.idea
+fe-app-podkop/node_modules
+fe-app-podkop/.env
+.DS_Store
+.codex/
+out-apk/
+out-ipk/
+*.apk
+*.ipk
+fe-app-podkop/dist/
+fe-app-podkop/coverage/
+fe-app-podkop/.turbo/
+fe-app-podkop/.cache/
