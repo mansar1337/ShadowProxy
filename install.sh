@@ -160,7 +160,7 @@ main() {
         exit 1
     fi
 
-    for pkg in podkop luci-app-podkop; do
+    for pkg in shadowproxy luci-app-shadowproxy; do
         file=""
         for f in "$DOWNLOAD_DIR"/"$pkg"*; do
             if [ -f "$f" ]; then
@@ -208,7 +208,7 @@ main() {
         fi
     fi
 
-    find "$DOWNLOAD_DIR" -type f -name '*podkop*' -exec rm {} \;
+    find "$DOWNLOAD_DIR" -type f \( -name '*podkop*' -o -name '*shadowproxy*' \) -exec rm {} \;
 
     msg "Installing OpenWRT sing-box extended..."
     if ! wget -O - https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh | sh; then
