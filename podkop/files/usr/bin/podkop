@@ -918,6 +918,13 @@ run_subscription_script_for_section() {
         return 1
     fi
 
+    if [ "$probe_only" = "1" ]; then
+        log "Starting FORCED PING TEST for section '$section'" "info"
+    else
+        log "Starting FORCED SUBSCRIPTION UPDATE for section '$section'" "info"
+        log "Subscription URL: $subscription_url" "info"
+    fi
+
     cmd="/usr/bin/shadowproxy-subscription"
 
     if [ "$probe_only" = "1" ]; then
@@ -933,16 +940,39 @@ run_subscription_script_for_section() {
         cmd="$cmd --ua"
     fi
 
+    local ts_start ts_end elapsed
+    ts_start=$(date +%s)
+
     # shellcheck disable=SC2086
     eval "$cmd" > "$subscription_log" 2>&1
-    if [ $? -ne 0 ]; then
+    local rc=$?
+
+    ts_end=$(date +%s)
+    elapsed=$(( ts_end - ts_start ))
+
+    if [ $rc -ne 0 ]; then
         if [ "$probe_only" = "1" ]; then
-            log "Subscription ping-test script failed for section '$section'. See $subscription_log" "error"
+            log "PING TEST FAILED for section '$section' (elapsed: ${elapsed}s). Log: $subscription_log" "error"
         else
-            log "Subscription fetch script failed for section '$section'. See $subscription_log" "error"
+            log "SUBSCRIPTION UPDATE FAILED for section '$section' (elapsed: ${elapsed}s). Log: $subscription_log" "error"
         fi
+        # Print last lines of log to syslog for easier diagnostics
+        tail -5 "$subscription_log" 2>/dev/null | while IFS= read -r line; do
+            log "  >> $line" "error"
+        done
         return 1
     fi
+
+    if [ "$probe_only" = "1" ]; then
+        log "PING TEST COMPLETED for section '$section' (elapsed: ${elapsed}s)" "info"
+    else
+        log "SUBSCRIPTION UPDATE COMPLETED for section '$section' (elapsed: ${elapsed}s)" "info"
+    fi
+
+    # Print key lines from subscription log to syslog
+    grep -E "^.*(FETCH:|PROBE SUMMARY:|Selected active node)" "$subscription_log" 2>/dev/null | while IFS= read -r line; do
+        log "  >> $line" "info"
+    done
 
     return 0
 }
@@ -1380,6 +1410,17 @@ sing_box_configure_experimental() {
     log "Configuring cache database"
     local cache_file
     config_get cache_file "settings" "cache_path" "/tmp/sing-box/cache.db"
+
+    # Ensure the directory for the cache file exists before sing-box starts.
+    # Without this, sing-box silently ignores the cache_file block (including
+    # store_fakeip), which causes the "missing fakeip record" error.
+    local cache_dir
+    cache_dir="$(dirname "$cache_file")"
+    if [ -n "$cache_dir" ] && [ "$cache_dir" != "." ]; then
+        mkdir -p "$cache_dir" && log "Ensured cache dir exists: $cache_dir" "debug" \
+            || log "Failed to create cache dir: $cache_dir" "warn"
+    fi
+
     config=$(sing_box_cm_configure_cache_file "$config" true "$cache_file" true)
 
     log "Configuring Clash API"
@@ -2893,6 +2934,8 @@ Available commands:
     list_update             Update domain lists
     subscription_update     Update subscription nodes and active node
     subscription_ping_test  Run latency check for subscription nodes
+    force_subscription_update  Force immediate subscription update (all sections or specific)
+    force_ping_test         Force immediate ping test (all sections or specific)
     check_proxy             Check proxy connectivity
     check_nft               Check NFT rules
     check_nft_rules         Check NFT rules status
@@ -2937,6 +2980,14 @@ subscription_update)
     subscription_update "$2"
     ;;
 subscription_ping_test)
+    subscription_ping_test "$2"
+    ;;
+force_subscription_update)
+    log "FORCE SUBSCRIPTION UPDATE requested" "info"
+    subscription_update "$2"
+    ;;
+force_ping_test)
+    log "FORCE PING TEST requested" "info"
     subscription_ping_test "$2"
     ;;
 check_proxy)
