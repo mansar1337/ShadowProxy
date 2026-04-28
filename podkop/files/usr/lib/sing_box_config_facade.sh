@@ -139,11 +139,24 @@ sing_box_cf_add_proxy_outbound() {
             log "Invalid VLESS URL: missing required uuid/host/port fields" "error"
             return 1
         fi
-        if ! _normalize_transport "$transport" > /dev/null; then
+
+        local normalized_transport
+        normalized_transport=$(_normalize_transport "$transport") || {
             log "Invalid VLESS URL: unsupported transport '$transport'" "error"
             return 1
-        fi
-        config=$(sing_box_cm_add_vless_outbound "$config" "$tag" "$host" "$port" "$uuid" "$flow" "" "$packet_encoding")
+        }
+
+        # Pass normalized network transport so sing-box knows the correct
+        # network field (e.g. "tcp", "ws", "grpc", "httpupgrade", "xhttp").
+        # Previously always passed "" which caused sing-box to fall back to
+        # its default and ignore the transport block in some cases.
+        local vless_network
+        case "$normalized_transport" in
+            tcp|raw)   vless_network="" ;;   # sing-box default, omit field
+            *)         vless_network="$normalized_transport" ;;
+        esac
+
+        config=$(sing_box_cm_add_vless_outbound "$config" "$tag" "$host" "$port" "$uuid" "$flow" "$vless_network" "$packet_encoding")
         config=$(_add_outbound_security "$config" "$tag" "$url")
         config=$(_add_outbound_transport "$config" "$tag" "$url")
         ;;
@@ -359,27 +372,59 @@ _add_outbound_transport() {
     transport=$(_normalize_transport "$transport") || return 1
     case "$transport" in
     tcp | raw) ;;
-    udp | http | httpupgrade | xhttp)
+    udp)
         log "Transport '$transport' detected and accepted without extra transport patching" "debug"
         ;;
     ws)
-        local ws_path ws_host ws_early_data
+        local ws_path ws_host ws_early_data ws_early_data_header
         ws_path=$(url_get_query_param "$url" "path")
         ws_host=$(url_get_query_param "$url" "host")
+        # "ed" param carries max_early_data size; header name differs by client:
+        # Xray uses "Sec-WebSocket-Protocol", sing-box default is also that.
         ws_early_data=$(url_get_query_param "$url" "ed")
+        ws_early_data_header=$(url_get_query_param "$url" "edHeader")
+        [ -z "$ws_early_data_header" ] && [ -n "$ws_early_data" ] && ws_early_data_header="Sec-WebSocket-Protocol"
 
         config=$(
-            sing_box_cm_set_ws_transport_for_outbound "$config" "$outbound_tag" "$ws_path" "$ws_host" "$ws_early_data"
+            sing_box_cm_set_ws_transport_for_outbound "$config" "$outbound_tag" "$ws_path" "$ws_host" "$ws_early_data" "$ws_early_data_header"
         )
+        log "WS transport: path='$ws_path' host='$ws_host' early_data='$ws_early_data'" "debug"
         ;;
     grpc)
-        # TODO(ampetelin): Add handling of optional gRPC parameters; example links are needed.
-        local grpc_service_name
+        local grpc_service_name grpc_authority
         grpc_service_name=$(url_get_query_param "$url" "serviceName")
+        # Some clients encode authority/host in "authority" param
+        grpc_authority=$(url_get_query_param "$url" "authority")
+        [ -z "$grpc_authority" ] && grpc_authority=$(url_get_query_param "$url" "host")
 
         config=$(
             sing_box_cm_set_grpc_transport_for_outbound "$config" "$outbound_tag" "$grpc_service_name"
         )
+        log "gRPC transport: serviceName='$grpc_service_name' authority='$grpc_authority'" "debug"
+        ;;
+    httpupgrade)
+        local hu_path hu_host
+        hu_path=$(url_get_query_param "$url" "path")
+        hu_host=$(url_get_query_param "$url" "host")
+
+        config=$(
+            sing_box_cm_set_httpupgrade_transport_for_outbound "$config" "$outbound_tag" "$hu_path" "$hu_host"
+        )
+        log "HTTPUpgrade transport: path='$hu_path' host='$hu_host'" "debug"
+        ;;
+    xhttp)
+        local xhttp_path xhttp_host xhttp_mode
+        xhttp_path=$(url_get_query_param "$url" "path")
+        xhttp_host=$(url_get_query_param "$url" "host")
+        xhttp_mode=$(url_get_query_param "$url" "mode")
+
+        config=$(
+            sing_box_cm_set_xhttp_transport_for_outbound "$config" "$outbound_tag" "$xhttp_path" "$xhttp_host" "$xhttp_mode"
+        )
+        log "XHTTP transport: path='$xhttp_path' host='$xhttp_host' mode='$xhttp_mode'" "debug"
+        ;;
+    http)
+        log "Transport '$transport' detected and accepted without extra transport patching" "debug"
         ;;
     *)
         log "Unknown transport '$transport' detected." "error"
