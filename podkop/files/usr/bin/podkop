@@ -640,7 +640,7 @@ sing_box_configure_service() {
 }
 
 sing_box_init_config() {
-    local config='{"log":{},"dns":{},"ntp":{},"certificate":{},"endpoints":[],"inbounds":[],"outbounds":[],"route":{},"services":[],"experimental":{}}'
+    local config='{"log":{},"dns":{"rule_set":[]},"ntp":{},"certificate":{},"endpoints":[],"inbounds":[],"outbounds":[],"route":{},"services":[],"experimental":{}}'
 
     sing_box_configure_log
     sing_box_configure_inbounds
@@ -1255,7 +1255,10 @@ configure_community_list_handler() {
     detour="$(get_download_detour_tag)"
     config_get update_interval "settings" "update_interval" "1d"
 
+    # Add to route.rule_set (for routing) AND dns.rule_set (required in sing-box 1.12+
+    # for dns.rules to be able to reference this ruleset).
     config=$(sing_box_cm_add_remote_ruleset "$config" "$ruleset_tag" "$format" "$url" "$detour" "$update_interval")
+    config=$(sing_box_cm_add_dns_remote_ruleset "$config" "$ruleset_tag" "$format" "$url" "$detour" "$update_interval")
     config=$(sing_box_cm_patch_route_rule "$config" "$route_rule_tag" "rule_set" "$ruleset_tag")
     config=$(sing_box_cm_patch_dns_route_rule "$config" "$SB_FAKEIP_DNS_RULE_TAG" "rule_set" "$ruleset_tag")
 }
@@ -1276,6 +1279,9 @@ prepare_source_ruleset() {
         config=$(sing_box_cm_patch_route_rule "$config" "$route_rule_tag" "rule_set" "$ruleset_tag")
         case "$type" in
         domains)
+            # In sing-box 1.12+ dns.rules can only reference dns.rule_set, not route.rule_set.
+            # Mirror the local ruleset into dns.rule_set so the fakeip DNS rule resolves correctly.
+            config=$(sing_box_cm_add_dns_local_ruleset "$config" "$ruleset_tag" "source" "$ruleset_filepath")
             config=$(sing_box_cm_patch_dns_route_rule "$config" "$SB_FAKEIP_DNS_RULE_TAG" "rule_set" "$ruleset_tag")
             ;;
         subnets) ;;
@@ -1392,6 +1398,8 @@ configure_remote_domain_or_subnet_list_handler() {
         config=$(sing_box_cm_patch_route_rule "$config" "$route_rule_tag" "rule_set" "$ruleset_tag")
         case "$type" in
         domains)
+            # In sing-box 1.12+ dns.rules can only reference dns.rule_set, not route.rule_set.
+            config=$(sing_box_cm_add_dns_remote_ruleset "$config" "$ruleset_tag" "$format" "$url" "$detour" "$update_interval")
             config=$(sing_box_cm_patch_dns_route_rule "$config" "$SB_FAKEIP_DNS_RULE_TAG" "rule_set" "$ruleset_tag")
             ;;
         subnets) ;;
