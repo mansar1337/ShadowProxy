@@ -72,6 +72,7 @@ sing_box_cm_configure_dns() {
         '.dns = {
 			servers: (.dns.servers // []),
 			rules: (.dns.rules // []),
+			rule_set: (.dns.rule_set // []),
 			final: $final,
 			strategy: $strategy,
 			independent_cache: $independent_cache
@@ -1443,6 +1444,78 @@ sing_box_cm_add_remote_ruleset() {
             + (if $update_interval != "" then { update_interval: $update_interval } else {} end)
         )]'
 
+}
+
+#######################################
+# Add a local ruleset to the dns.rule_set section of a sing-box JSON configuration.
+# In sing-box 1.12+ dns.rules can only reference dns.rule_set entries, not route.rule_set.
+# Arguments:
+#   config: string (JSON), sing-box configuration to modify
+#   tag: string, identifier for the local ruleset (must match the route.rule_set tag)
+#   format: string, format of the ruleset ("source" or "binary")
+#   path: string, local file path to the ruleset
+# Outputs:
+#   Writes updated JSON configuration to stdout
+#######################################
+sing_box_cm_add_dns_local_ruleset() {
+    local config="$1"
+    local tag="$2"
+    local format="$3"
+    local path="$4"
+
+    echo "$config" | jq \
+        --arg tag "$tag" \
+        --arg format "$format" \
+        --arg path "$path" \
+        'if (.dns.rule_set // []) | map(select(.tag == $tag)) | length == 0 then
+            .dns.rule_set += [{
+                type: "local",
+                tag: $tag,
+                format: $format,
+                path: $path
+            }]
+        else . end'
+}
+
+#######################################
+# Add a remote ruleset to the dns.rule_set section of a sing-box JSON configuration.
+# In sing-box 1.12+ dns.rules can only reference dns.rule_set entries, not route.rule_set.
+# Arguments:
+#   config: string (JSON), sing-box configuration to modify
+#   tag: string, identifier for the remote ruleset (must match the route.rule_set tag)
+#   format: string, format of the remote ruleset ("source" or "binary")
+#   url: string, URL to download the ruleset from
+#   download_detour: string, detour tag for downloading (optional)
+#   update_interval: string, update interval for the ruleset (optional)
+# Outputs:
+#   Writes updated JSON configuration to stdout
+#######################################
+sing_box_cm_add_dns_remote_ruleset() {
+    local config="$1"
+    local tag="$2"
+    local format="$3"
+    local url="$4"
+    local download_detour="$5"
+    local update_interval="$6"
+
+    echo "$config" | jq \
+        --arg tag "$tag" \
+        --arg format "$format" \
+        --arg url "$url" \
+        --arg download_detour "$download_detour" \
+        --arg update_interval "$update_interval" \
+        'if (.dns.rule_set // []) | map(select(.tag == $tag)) | length == 0 then
+            .dns.rule_set += [(
+                {
+                    type: "remote",
+                    tag: $tag,
+                    format: $format,
+                    url: $url
+                }
+                + (if $download_detour != "" then { download_detour: $download_detour } else {} end)
+                + (if $update_interval != "" then { update_interval: $update_interval } else {} end)
+            )]
+        else . end'
 }
 
 #######################################
