@@ -497,7 +497,7 @@ add_cron_job() {
                 cat
                 echo "$subscription_ping_cron"
             } | crontab -
-            log "The subscription ping-test cron job has been created for '$section_name': $subscription_ping_cron"
+            log "The subscription url-test cron job has been created for '$section_name': $subscription_ping_cron"
         fi
     fi
 }
@@ -919,7 +919,7 @@ run_subscription_script_for_section() {
     fi
 
     if [ "$probe_only" = "1" ]; then
-        log "Starting FORCED PING TEST for section '$section'" "info"
+        log "Starting FORCED URL TEST for section '$section'" "info"
     else
         log "Starting FORCED SUBSCRIPTION UPDATE for section '$section'" "info"
         log "Subscription URL: $subscription_url" "info"
@@ -952,7 +952,7 @@ run_subscription_script_for_section() {
 
     if [ $rc -ne 0 ]; then
         if [ "$probe_only" = "1" ]; then
-            log "PING TEST FAILED for section '$section' (elapsed: ${elapsed}s). Log: $subscription_log" "error"
+            log "URL TEST FAILED for section '$section' (elapsed: ${elapsed}s). Log: $subscription_log" "error"
         else
             log "SUBSCRIPTION UPDATE FAILED for section '$section' (elapsed: ${elapsed}s). Log: $subscription_log" "error"
         fi
@@ -964,7 +964,7 @@ run_subscription_script_for_section() {
     fi
 
     if [ "$probe_only" = "1" ]; then
-        log "PING TEST COMPLETED for section '$section' (elapsed: ${elapsed}s)" "info"
+        log "URL TEST COMPLETED for section '$section' (elapsed: ${elapsed}s)" "info"
     else
         log "SUBSCRIPTION UPDATE COMPLETED for section '$section' (elapsed: ${elapsed}s)" "info"
     fi
@@ -2941,9 +2941,9 @@ Available commands:
     main                    Run main podkop process
     list_update             Update domain lists
     subscription_update     Update subscription nodes and active node
-    subscription_ping_test  Run latency check for subscription nodes
+    subscription_ping_test  Run HTTP URL test for subscription nodes
     force_subscription_update  Force immediate subscription update (all sections or specific)
-    force_ping_test         Force immediate ping test (all sections or specific)
+    force_ping_test         Force immediate URL test (all sections or specific)
     check_proxy             Check proxy connectivity
     check_nft               Check NFT rules
     check_nft_rules         Check NFT rules status
@@ -2995,7 +2995,7 @@ force_subscription_update)
     subscription_update "$2"
     ;;
 force_ping_test)
-    log "FORCE PING TEST requested" "info"
+    log "FORCE URL TEST requested" "info"
     subscription_ping_test "$2"
     ;;
 check_proxy)
