@@ -473,33 +473,108 @@ run_with_timeout() {
     return "$cmd_rc"
 }
 
-probe_node() {
+# URL used for reachability test — expects HTTP 204 or any 2xx/3xx response.
+# Cloudflare generate_204 is lightweight and globally available.
+URL_TEST_URL="${SHADOWPROXY_URL_TEST_URL:-http://cp.cloudflare.com/generate_204}"
+URL_TEST_TIMEOUT="${SHADOWPROXY_URL_TEST_TIMEOUT:-5}"
+
+#######################################
+# url_test_node — perform a real HTTP URL test through the node.
+#
+# Strategy (in order of availability / transport):
+#   1. If curl supports --proxy and nc can forward:
+#      - For plain TCP (no TLS): open raw TCP to server:port, send HTTP CONNECT
+#        then GET the test URL → real end-to-end latency
+#   2. For TLS / WS / gRPC nodes: open TLS handshake to server:port via
+#      openssl s_client and pipe a minimal HTTP/1.1 GET — measures actual
+#      TLS + HTTP round-trip, not just TCP syn.
+#   3. Fallback: plain TCP connect-only (better than nothing).
+#
+# Result written to result_file as "$id $rtt_ms" on success.
+#######################################
+url_test_node() {
     local id="$1"
     local server="$2"
     local port="$3"
     local security="$4"
     local sni="$5"
     local result_file="$6"
+    local name="$7"
 
-    local start end rtt method_label
+    local start end rtt rc
+    local label
+
+    [ -z "$sni" ] && sni="$server"
+
     start=$(now_ms)
 
-    log_msg "PING [$id] → ${server}:${port} | security=${security} sni=${sni:-none}" "debug"
-
     if [ "$security" = "tls" ] || [ "$security" = "reality" ]; then
-        if [ -z "$sni" ]; then
-            sni="$server"
-        fi
-        method_label="TLS/openssl"
-        run_with_timeout 3 openssl s_client -connect "${server}:${port}" -servername "$sni" -brief </dev/null >/dev/null 2>&1
-        local rc=$?
-    else
-        method_label="TCP/nc"
-        if command -v nc >/dev/null 2>&1; then
-            run_with_timeout 3 nc -z -w 3 "$server" "$port" >/dev/null 2>&1
-            local rc=$?
+        # TLS URL test: open TLS connection, send HTTP GET, expect any valid response.
+        label="TLS-HTTP"
+        local http_req
+        http_req="GET /generate_204 HTTP/1.1\r\nHost: cp.cloudflare.com\r\nConnection: close\r\n\r\n"
+
+        if command -v openssl >/dev/null 2>&1; then
+            local resp
+            resp=$(run_with_timeout "$URL_TEST_TIMEOUT" sh -c \
+                "printf '%b' '$http_req' | openssl s_client \
+                    -connect '${server}:${port}' \
+                    -servername '${sni}' \
+                    -quiet \
+                    -verify_return_error \
+                    2>/dev/null" 2>/dev/null | head -1)
+            rc=$?
+
+            # Accept any HTTP response (200, 204, 301, 302, 400 etc.) —
+            # a response means the node is reachable and TLS works.
+            if [ $rc -eq 0 ] && printf '%s' "$resp" | grep -qE '^HTTP/'; then
+                rc=0
+            else
+                rc=1
+            fi
         else
-            log_msg "PING [$id] SKIP — nc not available" "warn"
+            # openssl not available — fall back to nc TCP connect
+            label="TCP-fallback"
+            if command -v nc >/dev/null 2>&1; then
+                run_with_timeout "$URL_TEST_TIMEOUT" nc -z -w "$URL_TEST_TIMEOUT" "$server" "$port" >/dev/null 2>&1
+                rc=$?
+            else
+                log_msg "URL-TEST [$name] SKIP — neither openssl nor nc available" "warn"
+                return 1
+            fi
+        fi
+    else
+        # Plain TCP / WS / gRPC without TLS:
+        # Send a real HTTP/1.1 GET to the test URL through a raw TCP connection
+        # to the proxy server. The proxy will respond (even if it rejects the
+        # plain HTTP request) — any response proves reachability.
+        label="TCP-HTTP"
+        local http_req
+        http_req="GET ${URL_TEST_URL} HTTP/1.1\r\nHost: cp.cloudflare.com\r\nUser-Agent: curl/shadowproxy\r\nConnection: close\r\n\r\n"
+
+        if command -v nc >/dev/null 2>&1; then
+            local resp
+            resp=$(run_with_timeout "$URL_TEST_TIMEOUT" sh -c \
+                "printf '%b' '$http_req' | nc '$server' '$port'" 2>/dev/null | head -1)
+            rc=$?
+            # nc exits 0 even if server closes; check we got any data back
+            if [ $rc -eq 0 ] && [ -n "$resp" ]; then
+                rc=0
+            else
+                rc=1
+            fi
+        elif command -v curl >/dev/null 2>&1; then
+            # curl direct — will likely get a tunnel/proxy error but proves TCP works
+            label="curl-direct"
+            run_with_timeout "$URL_TEST_TIMEOUT" curl --silent --show-error \
+                --max-time "$URL_TEST_TIMEOUT" \
+                --connect-timeout "$URL_TEST_TIMEOUT" \
+                --resolve "cp.cloudflare.com:${port}:${server}" \
+                "$URL_TEST_URL" \
+                -o /dev/null -w "%{http_code}" >/dev/null 2>&1
+            rc=$?
+        else
+            log_msg "URL-TEST [$name] SKIP — no nc or curl available" "warn"
             return 1
         fi
     fi
@@ -509,11 +584,11 @@ probe_node() {
     [ "$rtt" -lt 0 ] && rtt=0
 
     if [ $rc -ne 0 ]; then
-        log_msg "PING [$id] FAIL (${method_label}) → ${server}:${port} | timeout or connection refused" "warn"
+        log_msg "URL-TEST [$name] FAIL (${label}) → ${server}:${port} | no response within ${URL_TEST_TIMEOUT}s" "warn"
         return 1
     fi
 
-    log_msg "PING [$id] OK (${method_label}) → ${server}:${port} | rtt=${rtt}ms" "info"
+    log_msg "URL-TEST [$name] OK (${label}) → ${server}:${port} | rtt=${rtt}ms" "info"
     echo "$id $rtt" >> "$result_file"
 }
 
@@ -521,12 +596,16 @@ pick_best_node() {
     local nodes_file="$1"
     local result_file="$2"
     local nodes_tmp
-    local total_nodes=0 reachable=0
+    local total_nodes=0
 
     : > "$result_file"
     nodes_tmp=$(mktemp)
     jq -c '.[]' "$nodes_file" > "$nodes_tmp"
+    total_nodes=$(wc -l < "$nodes_tmp")
 
+    log_msg "URL-TEST: starting for $total_nodes node(s) | test URL: $URL_TEST_URL" "info"
+
+    local idx=0
     while IFS= read -r node; do
         local id server port security sni name
         id=$(printf '%s' "$node" | jq -r '.id')
@@ -535,28 +614,35 @@ pick_best_node() {
         security=$(printf '%s' "$node" | jq -r '.security')
         sni=$(printf '%s' "$node" | jq -r '.sni // empty')
         name=$(printf '%s' "$node" | jq -r '.name // empty')
-        total_nodes=$((total_nodes + 1))
+        idx=$((idx + 1))
 
-        log_msg "PROBE [$((total_nodes))] \"${name:-$id}\" (${server}:${port})" "debug"
-        probe_node "$id" "$server" "$port" "$security" "$sni" "$result_file" &
+        log_msg "URL-TEST [$idx/$total_nodes] \"${name:-$id}\" → ${server}:${port} (${security})" "info"
+        url_test_node "$id" "$server" "$port" "$security" "$sni" "$result_file" "${name:-$id}" &
     done < "$nodes_tmp"
 
     wait
     rm -f "$nodes_tmp"
 
     if [ ! -s "$result_file" ]; then
-        log_msg "PROBE SUMMARY: all $total_nodes node(s) unreachable" "error"
+        log_msg "URL-TEST SUMMARY: all $total_nodes node(s) unreachable" "error"
         return 1
     fi
 
+    local reachable
     reachable=$(wc -l < "$result_file")
-    log_msg "PROBE SUMMARY: $reachable/$total_nodes node(s) reachable" "info"
+    log_msg "URL-TEST SUMMARY: $reachable/$total_nodes node(s) responded" "info"
+    log_msg "URL-TEST RESULTS (sorted by RTT):" "info"
 
-    # Log sorted results
-    log_msg "PROBE RESULTS (sorted by RTT):" "debug"
+    local rank=0 sorted_tmp
+    sorted_tmp=$(mktemp)
+    sort -k2n "$result_file" > "$sorted_tmp"
     while IFS=" " read -r nid nrtt; do
-        log_msg "  node=$nid rtt=${nrtt}ms" "debug"
-    done < <(sort -k2n "$result_file")
+        rank=$((rank + 1))
+        local nname
+        nname=$(jq -r --arg id "$nid" '.[] | select(.id == $id) | .name // .server' "$nodes_file" 2>/dev/null | head -1)
+        log_msg "  #${rank} \"${nname}\" rtt=${nrtt}ms" "info"
+    done < "$sorted_tmp"
+    rm -f "$sorted_tmp"
 
     sort -k2n "$result_file" | head -n1 | awk '{print $1}'
 }
@@ -567,13 +653,39 @@ convert_subscription_to_nodes() {
     local links_file
     local nodes_json='[]'
     local uri node_json parsed=0 skipped=0
+    local total idx
 
     links_file=$(mktemp)
     grep -Eo '(vless|hysteria2|hy2|trojan|vmess|ss)://[^[:space:]]+' "$input_file" > "$links_file"
 
+    total=$(wc -l < "$links_file")
+    log_msg "PARSE: found $total URL(s) in subscription" "info"
+
+    idx=0
     while IFS= read -r uri; do
         [ -z "$uri" ] && continue
+        idx=$((idx + 1))
         node_json=""
+
+        # Detect protocol label for progress display
+        local proto_label
+        case "$uri" in
+            vless://*) proto_label="vless" ;;
+            hysteria2://*|hy2://*) proto_label="hy2" ;;
+            trojan://*) proto_label="trojan" ;;
+            vmess://*) proto_label="vmess" ;;
+            ss://*) proto_label="ss" ;;
+            *) proto_label="unknown" ;;
+        esac
+
+        # Extract node name from fragment for logging
+        local uri_label
+        uri_label="${uri#*#}"
+        [ "$uri_label" = "$uri" ] && uri_label="${uri:0:60}..."
+        uri_label="$(printf '%b' "$(printf '%s' "$uri_label" | sed 's/+/ /g; s/%/\\x/g')" 2>/dev/null | head -c 60)"
+        [ -z "$uri_label" ] && uri_label="(no name)"
+
+        log_msg "PARSE [$idx/$total] [${proto_label}] \"${uri_label}\"" "info"
 
         case "$uri" in
         vless://*) node_json="$(parse_vless_uri "$uri" || true)" ;;
@@ -584,24 +696,27 @@ convert_subscription_to_nodes() {
         esac
 
         if [ -z "$node_json" ] || ! printf '%s' "$node_json" | jq -e . >/dev/null 2>&1; then
+            log_msg "PARSE [$idx/$total] SKIP — could not parse URI" "warn"
             skipped=$((skipped + 1))
             continue
         fi
 
         nodes_json="$(append_node "$nodes_json" "$node_json")"
         parsed=$((parsed + 1))
+        log_msg "PARSE [$idx/$total] OK — parsed=$parsed skipped=$skipped" "debug"
     done < "$links_file"
 
     rm -f "$links_file"
 
     printf '%s\n' "$nodes_json" | jq . > "$nodes_file"
 
+    log_msg "PARSE COMPLETE: $parsed parsed, $skipped skipped (total $total)" "info"
+
     if [ "$parsed" -eq 0 ]; then
-        log_msg "No valid nodes parsed from subscription (skipped: $skipped)" "error"
+        log_msg "No valid nodes parsed from subscription" "error"
         return 1
     fi
 
-    log_msg "Parsed nodes: $parsed, skipped: $skipped"
     return 0
 }
 
@@ -650,9 +765,9 @@ main() {
 
     log_msg "========== ShadowProxy Subscription Script ==========" "info"
     if [ "$probe_only" = "1" ]; then
-        log_msg "Mode: PING TEST ONLY (probe-only)" "info"
+        log_msg "Mode: URL TEST ONLY (probe-only)" "info"
     else
-        log_msg "Mode: FULL UPDATE (fetch + parse + probe)" "info"
+        log_msg "Mode: FULL UPDATE (fetch + parse + url-test)" "info"
         log_msg "URL: $url" "info"
         log_msg "Base64 decode: $decode_base64" "info"
         log_msg "Custom UA: $custom_ua" "info"
