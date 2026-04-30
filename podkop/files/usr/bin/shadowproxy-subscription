@@ -176,7 +176,6 @@ parse_vless_uri() {
     local uri="$1"
     local stripped auth_host query host port uuid
     local security insecure_raw insecure transport name node_id sni alpn
-    local flow fp pbk sid
 
     stripped="${uri#vless://}"
     stripped="${stripped%%#*}"
@@ -208,31 +207,6 @@ parse_vless_uri() {
 
     sni="$(printf '%s' "$query" | sed -n 's/.*[?&]sni=\([^&]*\).*/\1/p')"
     alpn="$(printf '%s' "$query" | sed -n 's/.*[?&]alpn=\([^&]*\).*/\1/p')"
-
-    # Reality / TLS extra params
-    flow="$(printf '%s' "$query" | sed -n 's/.*[?&]flow=\([^&]*\).*/\1/p')"
-    fp="$(printf '%s' "$query" | sed -n 's/.*[?&]fp=\([^&]*\).*/\1/p')"
-    pbk="$(printf '%s' "$query" | sed -n 's/.*[?&]pbk=\([^&]*\).*/\1/p')"
-    sid="$(printf '%s' "$query" | sed -n 's/.*[?&]sid=\([^&]*\).*/\1/p')"
-
-    # Transport-specific params (stored in raw_uri, used during outbound build)
-    local ws_path grpc_service_name xhttp_path xhttp_mode hu_path
-    ws_path="$(printf '%s' "$query" | sed -n 's/.*[?&]path=\([^&]*\).*/\1/p')"
-    grpc_service_name="$(printf '%s' "$query" | sed -n 's/.*[?&]serviceName=\([^&]*\).*/\1/p')"
-    xhttp_mode="$(printf '%s' "$query" | sed -n 's/.*[?&]mode=\([^&]*\).*/\1/p')"
-
-    if [ -n "$flow" ]; then
-        log_msg "VLESS flow detected: $flow" "debug"
-    fi
-    if [ "$security" = "reality" ]; then
-        log_msg "VLESS Reality: fp='$fp' pbk='${pbk:0:16}...' sid='$sid'" "debug"
-    fi
-    case "$transport" in
-        ws)        [ -n "$ws_path" ] && log_msg "VLESS WS path: $ws_path" "debug" ;;
-        grpc)      [ -n "$grpc_service_name" ] && log_msg "VLESS gRPC serviceName: $grpc_service_name" "debug" ;;
-        xhttp)     log_msg "VLESS XHTTP path='$xhttp_path' mode='$xhttp_mode'" "debug" ;;
-        httpupgrade) log_msg "VLESS HTTPUpgrade path='$ws_path'" "debug" ;;
-    esac
 
     name="$(decode_node_name "$uri")"
     [ -z "$name" ] && name="vless-${host}:${port}"
@@ -481,25 +455,19 @@ probe_node() {
     local sni="$5"
     local result_file="$6"
 
-    local start end rtt method_label
+    local start end rtt
     start=$(now_ms)
-
-    log_msg "PING [$id] → ${server}:${port} | security=${security} sni=${sni:-none}" "debug"
 
     if [ "$security" = "tls" ] || [ "$security" = "reality" ]; then
         if [ -z "$sni" ]; then
             sni="$server"
         fi
-        method_label="TLS/openssl"
-        run_with_timeout 3 openssl s_client -connect "${server}:${port}" -servername "$sni" -brief </dev/null >/dev/null 2>&1
-        local rc=$?
+
+        run_with_timeout 3 openssl s_client -connect "${server}:${port}" -servername "$sni" -brief </dev/null >/dev/null 2>&1 || return 1
     else
-        method_label="TCP/nc"
         if command -v nc >/dev/null 2>&1; then
-            run_with_timeout 3 nc -z -w 3 "$server" "$port" >/dev/null 2>&1
-            local rc=$?
+            run_with_timeout 3 nc -z -w 3 "$server" "$port" >/dev/null 2>&1 || return 1
         else
-            log_msg "PING [$id] SKIP — nc not available" "warn"
             return 1
         fi
     fi
@@ -507,13 +475,6 @@ probe_node() {
     end=$(now_ms)
     rtt=$(( end - start ))
     [ "$rtt" -lt 0 ] && rtt=0
-
-    if [ $rc -ne 0 ]; then
-        log_msg "PING [$id] FAIL (${method_label}) → ${server}:${port} | timeout or connection refused" "warn"
-        return 1
-    fi
-
-    log_msg "PING [$id] OK (${method_label}) → ${server}:${port} | rtt=${rtt}ms" "info"
     echo "$id $rtt" >> "$result_file"
 }
 
@@ -521,23 +482,19 @@ pick_best_node() {
     local nodes_file="$1"
     local result_file="$2"
     local nodes_tmp
-    local total_nodes=0 reachable=0
 
     : > "$result_file"
     nodes_tmp=$(mktemp)
     jq -c '.[]' "$nodes_file" > "$nodes_tmp"
 
     while IFS= read -r node; do
-        local id server port security sni name
+        local id server port security sni
         id=$(printf '%s' "$node" | jq -r '.id')
         server=$(printf '%s' "$node" | jq -r '.server')
         port=$(printf '%s' "$node" | jq -r '.port')
         security=$(printf '%s' "$node" | jq -r '.security')
         sni=$(printf '%s' "$node" | jq -r '.sni // empty')
-        name=$(printf '%s' "$node" | jq -r '.name // empty')
-        total_nodes=$((total_nodes + 1))
 
-        log_msg "PROBE [$((total_nodes))] \"${name:-$id}\" (${server}:${port})" "debug"
         probe_node "$id" "$server" "$port" "$security" "$sni" "$result_file" &
     done < "$nodes_tmp"
 
@@ -545,18 +502,8 @@ pick_best_node() {
     rm -f "$nodes_tmp"
 
     if [ ! -s "$result_file" ]; then
-        log_msg "PROBE SUMMARY: all $total_nodes node(s) unreachable" "error"
         return 1
     fi
-
-    reachable=$(wc -l < "$result_file")
-    log_msg "PROBE SUMMARY: $reachable/$total_nodes node(s) reachable" "info"
-
-    # Log sorted results
-    log_msg "PROBE RESULTS (sorted by RTT):" "debug"
-    while IFS=" " read -r nid nrtt; do
-        log_msg "  node=$nid rtt=${nrtt}ms" "debug"
-    done < <(sort -k2n "$result_file")
 
     sort -k2n "$result_file" | head -n1 | awk '{print $1}'
 }
@@ -648,17 +595,6 @@ main() {
 
     mkdir -p "$NODES_DIR"
 
-    log_msg "========== ShadowProxy Subscription Script ==========" "info"
-    if [ "$probe_only" = "1" ]; then
-        log_msg "Mode: PING TEST ONLY (probe-only)" "info"
-    else
-        log_msg "Mode: FULL UPDATE (fetch + parse + probe)" "info"
-        log_msg "URL: $url" "info"
-        log_msg "Base64 decode: $decode_base64" "info"
-        log_msg "Custom UA: $custom_ua" "info"
-    fi
-    log_msg "=====================================================" "info"
-
     local raw_file processed_file probe_result active_node previous_active headers_file
     raw_file=""
     processed_file=""
@@ -682,10 +618,6 @@ main() {
             curl_args="$curl_args --compressed"
         fi
 
-        log_msg "FETCH: Downloading subscription from: $url" "info"
-        local fetch_start fetch_end fetch_rtt
-        fetch_start=$(now_ms)
-
         if [ "$custom_ua" = "1" ]; then
             curl $curl_args \
                 -H 'User-Agent: ShadowProxy/latest/OpenWRT/17764321936841767581' \
@@ -702,16 +634,10 @@ main() {
         fi
 
         if [ $? -ne 0 ] || [ ! -s "$raw_file" ]; then
-            log_msg "FETCH: Failed to download subscription URL" "error"
+            log_msg "Failed to fetch subscription URL" "error"
             rm -f "$raw_file" "$processed_file" "$probe_result" "$headers_file"
             exit 1
         fi
-
-        fetch_end=$(now_ms)
-        fetch_rtt=$(( fetch_end - fetch_start ))
-        local raw_size
-        raw_size=$(wc -c < "$raw_file" 2>/dev/null || echo "?")
-        log_msg "FETCH: Success | size=${raw_size} bytes | time=${fetch_rtt}ms" "info"
 
         if [ "$curl_supports_compressed" = "0" ] && grep -qi '^content-encoding:[[:space:]]*gzip' "$headers_file"; then
             if command -v gzip >/dev/null 2>&1; then
@@ -773,21 +699,7 @@ main() {
         jq -n --arg active_node "$active_node" '{active_node: $active_node}' > "$CONFIG_JSON"
     fi
 
-    # Log selected node details
-    local selected_name selected_server selected_port selected_rtt
-    selected_name=$(jq -r --arg id "$active_node" '.[] | select(.id == $id) | .name // .server' "$NODES_JSON" 2>/dev/null | head -1)
-    selected_server=$(jq -r --arg id "$active_node" '.[] | select(.id == $id) | .server' "$NODES_JSON" 2>/dev/null | head -1)
-    selected_port=$(jq -r --arg id "$active_node" '.[] | select(.id == $id) | .port' "$NODES_JSON" 2>/dev/null | head -1)
-    selected_rtt=$(grep "^$active_node " "$probe_result" 2>/dev/null | awk '{print $2}')
-
-    if [ "$previous_active" = "$active_node" ]; then
-        log_msg "Selected active node (unchanged): \"${selected_name}\" (${selected_server}:${selected_port}) | rtt=${selected_rtt:-?}ms | id=$active_node" "info"
-    else
-        log_msg "Selected active node (CHANGED): \"${selected_name}\" (${selected_server}:${selected_port}) | rtt=${selected_rtt:-?}ms | id=$active_node" "info"
-        log_msg "  Previous node: ${previous_active:-none}" "info"
-    fi
-
-    log_msg "========== Script completed successfully ==========" "info"
+    log_msg "Selected active node: $active_node"
 
     rm -f "$raw_file" "$processed_file" "$probe_result" "$headers_file"
     exit 0
