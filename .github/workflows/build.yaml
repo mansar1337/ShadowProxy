@@ -143,8 +143,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p out-apk
-          # Docker container runs as root; grant write access so cp into /out works.
-          chmod 777 out-apk
 
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
@@ -235,8 +233,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p out-ipk
-          # Docker container runs as root; grant write access so cp into /out works.
-          chmod 777 out-ipk
 
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
